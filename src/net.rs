@@ -1,15 +1,14 @@
 use crate::protocol::{ ClientPacket, ServerPacket };
-use crate::ui;
 
+use tokio::sync::mpsc;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 use tokio::io::AsyncWriteExt;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 
-use iced::futures::channel::mpsc;
 use iced::futures::sink::SinkExt;
-use iced::futures::Stream;
+// use iced::futures::Stream;
 use iced::stream;
 use iced::Subscription;
 
@@ -21,6 +20,7 @@ pub enum ExitType {
 
 #[derive(Clone)]
 pub enum ConnEvent {
+    Connecting,
     Connected(mpsc::Sender<ClientPacket>),
     Disconnected,
     Packet(ServerPacket),
@@ -28,95 +28,83 @@ pub enum ConnEvent {
 }
 
 
-pub fn connect() -> Subscription<ui::Message> {
-    Subscription::run(connect_stream).map(|conn_event| {
-        ui::Message::ConnMessage(conn_event)
-    })
-}
-
 pub async fn send_packet(writer: &mut OwnedWriteHalf, packet: &ClientPacket) {
     if let Ok(json_str) = serde_json::to_string(packet)
-        .inspect_err(|e| eprintln!("tried to send malformed ClientPacket: {packet:?}")) {
-        writer.write_all((json_str + "\n").as_bytes())
+        .inspect_err(|_e| eprintln!("tried to send malformed ClientPacket: {packet:?}")) {
+        let _ = writer.write_all((json_str + "\n").as_bytes())
             .await
             .inspect_err(|e| eprintln!("Error in writer: {e:?}"));
     }
 }
 
-pub fn connect_stream() -> impl Stream<Item = ConnEvent> {
-    stream::channel(100, async move |mut output| {
-        let addr = "127.0.0.1:9090";
-        let token = "1:TCiSl0xNp6sga3XoYOL1ooLA00VLli8s";
+pub fn connect(token: String) -> Subscription<crate::ui::Message> {
+    Subscription::run_with(
+        token,
+        |token_ref: &String| {
+            let addr = "127.0.0.1:9090";
+            let token_owned = token_ref.clone();
 
-        println!("Establishing connection...");
-        let (reader, mut writer) = TcpStream::connect(addr)
-            .await
-            .map(|r| dbg!(r))
-            .expect("Could not instantiate socket.")
-            .into_split();
-        println!("successfully connected to host.");
+            stream::channel(100, async move |mut output| {
+                println!("Establishing connection to {addr}...");
 
-        let (sender, mut receiver) = mpsc::channel::<ClientPacket>(100);
+                let stream = match TcpStream::connect(addr).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = output.send(ConnEvent::Exit(ExitType::UndefinedError(e.to_string()))).await;
+                        return;
+                    }
+                };
 
-        output.send(ConnEvent::Connected(sender)).await;
+                let (reader, mut writer) = stream.into_split();                  // tcp over network
+                let (sender, mut receiver) = mpsc::channel::<ClientPacket>(100); // internal
 
-        let mut reader = BufReader::new(reader).lines();
+                let _ = output.send(ConnEvent::Connected(sender)).await;
 
-        // sending token
-        send_packet(&mut writer, &ClientPacket::AuthToken(String::from(token))).await;
+                send_packet(&mut writer, &ClientPacket::AuthToken(token_owned)).await;
 
-        loop {
-            tokio::select! {
-                json_str = reader.next_line() => {
-                    let json_str = match json_str {
-                        Ok(Some(str)) => str,
-                        Ok(None) => {
-                            output.send(ConnEvent::Exit(ExitType::SocketClosed)).await;
-                            break;
+                let mut reader = BufReader::new(reader).lines();
+
+                loop {
+                    tokio::select! {
+                        line = reader.next_line() => {
+                            if !handle_packet(&mut output, line).await {
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Socket read error, closing connection: {e}");
-                            output.send(ConnEvent::Exit(ExitType::UndefinedError(e.to_string()))).await;
-                            break;
+
+                        packet = receiver.recv() => {
+                            let Some(packet) = packet else { break };
+                            send_packet(&mut writer, &packet).await;
                         }
-                    };
-
-                    let packet: ServerPacket = match serde_json::from_str(&json_str) {
-                        Ok(packet) => packet,
-                        Err(e) => {
-                            eprintln!("bad json from client: \n{json_str}\n");
-                            continue;
-                        }
-                    };
-
-                    output.send(
-                        ConnEvent::Packet(packet)
-                    ).await
-                        .inspect_err(|e| eprintln!("unable to forward string {json_str:?}: {e}"));
-                }
-
-                packet = receiver.recv() => {
-                    let packet = packet.unwrap();
-                    // let packet = match packet {
-                    //     Ok(packet) => packet,
-                    //     Err(e) => {
-                    //         eprintln!("{e:?}");
-                    //         break;
-                    //     }
-                    // };
-
-                    if let Ok(json_str) = serde_json::to_string(&packet)
-                        .inspect_err(|e| eprintln!("tried to send malformed ClientPacket: {packet:?}")) {
-                        writer.write_all((json_str + "\n").as_bytes())
-                            .await
-                            .inspect_err(|e| eprintln!("Error in writer: {e:?}"));
                     }
                 }
+            })
+        }
+    ).map(crate::ui::Message::ConnMessage)
+}
 
+pub async fn handle_packet(
+    output: &mut iced::futures::channel::mpsc::Sender<ConnEvent>,
+    line: std::io::Result<Option<String>>,
+) -> bool {
+    match line {
+        Ok(Some(json_str)) => {
+            if let Ok(packet) = serde_json::from_str::<ServerPacket>(&json_str) {
+                let _ = output.send(ConnEvent::Packet(packet)).await;
+            } else {
+                eprintln!("Bad JSON: {json_str}");
             }
         }
 
-        // TODO: ensure connection is closed
-        // let _ = channel.send(None);
-    })
+        Ok(None) => {
+            let _ = output.send(ConnEvent::Exit(ExitType::SocketClosed)).await;
+            return false;
+        }
+        Err(e) => {
+            let _ = output.send(ConnEvent::Exit(ExitType::UndefinedError(e.to_string()))).await;
+            return false;
+        }
+    }
+
+    true
 }

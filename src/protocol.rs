@@ -1,8 +1,16 @@
 use serde::{ Serialize, Deserialize };
-// use tokio::sync::{ mpsc, oneshot };
 use tokio::sync::{ mpsc };
 use chrono::{ NaiveDateTime };
-// use chrono::prelude::*;
+
+pub mod kattauth {
+    use serde::{ Serialize, Deserialize };
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub struct LoginDetails {
+        pub username: String,
+        pub hashword: String,
+    }
+}
 
 pub type MessageId = i64;
 pub type UserId = i64;
@@ -24,8 +32,6 @@ pub enum ClientPacket {
     JustConnected(mpsc::Sender<ServerPacket>),
     LastUpdated {
         datetime: String, // DateTime<Utc>, 
-        // #[serde(skip)]
-        // resp: Option<ClientConn>,
     },
     Message {
         channel_id: ChannelId,
@@ -91,6 +97,7 @@ pub enum ServerPacket {
     LoginSuccess {
         user: UserDetails,
     },
+
     Error {
         code: Error,
         reason: String,
