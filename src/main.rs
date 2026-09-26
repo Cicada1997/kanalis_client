@@ -10,8 +10,17 @@ use state::{ State };
 use iced::Theme;
 
 fn main() -> iced::Result {
+    dotenv::dotenv().ok();
+
     iced::application(State::default, update, view)
-        .subscription(|_: &State| connect())
+        .subscription(|state: &State| {
+            state.current_token.as_ref()
+                .map_or_else(
+                    iced::Subscription::none,
+                    |token| connect(token.clone())
+                )
+
+        })
         .theme(|_: &State| Theme::Dark)
         .centered()
         .run()
