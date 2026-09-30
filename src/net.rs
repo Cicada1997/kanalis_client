@@ -12,13 +12,13 @@ use iced::futures::sink::SinkExt;
 use iced::stream;
 use iced::Subscription;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum ExitType {
     SocketClosed,
     UndefinedError(String),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum ConnEvent {
     Connecting,
     Connected(mpsc::Sender<ClientPacket>),
@@ -41,7 +41,7 @@ pub fn connect(token: String) -> Subscription<crate::ui::Message> {
     Subscription::run_with(
         token,
         |token_ref: &String| {
-            let addr = "127.0.0.1:9090";
+            let addr = dotenv::var("HOST").expect("The environment variable 'HOST' must be set to an correct ip or url to connect to the chatserver");
             let token_owned = token_ref.clone();
 
             stream::channel(100, async move |mut output| {

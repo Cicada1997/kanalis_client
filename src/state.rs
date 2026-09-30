@@ -33,6 +33,7 @@ pub struct State {
     pub password_input_field: String,
 }
 
+#[derive(Debug)]
 pub enum AuthStatus {
     LoggedIn,
     Waiting,
@@ -72,7 +73,10 @@ impl State {
                 println!("Disconnected from server");
                 self.sender = None;
             }
-            ConnEvent::Exit(_reason) => std::process::exit(0),
+            ConnEvent::Exit(reason) => {
+                println!("exiting with reason: {reason:?}");
+                std::process::exit(0)
+            },
             ConnEvent::Packet(packet) => self.handle_server_packet(packet),
         }
     }
